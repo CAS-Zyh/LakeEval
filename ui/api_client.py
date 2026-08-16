@@ -45,6 +45,15 @@ class ApiClient:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def status(self):
+        """调用 /api/status，返回 {db_ephemeral, db_uri_masked, server_time} 或 None"""
+        try:
+            resp = requests.get(f"{BASE_URL[:-4] if BASE_URL.endswith('/api') else BASE_URL}/status", headers=self._headers(), timeout=8)
+            data = resp.json()
+            return data.get("data") if data.get("success") else None
+        except Exception:
+            return None
+
     def stream(self, path, data=None):
         try:
             resp = requests.post(

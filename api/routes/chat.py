@@ -8,6 +8,7 @@ from ..services.usage import (
     UsageLimitExceeded, get_today_usage, get_guest_usage,
 )
 from ..services.deepseek import DeepSeekClient
+from ..safe_db import safe_commit
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config import (
@@ -98,15 +99,18 @@ def send_message():
     history_records.reverse()
     history = [{"role": r.role, "content": r.content} for r in history_records]
 
-    # 保存用户消息
-    db.session.add(ChatHistory(
-        user_id=user.id if not is_guest else None,
-        guest_ip=user.ip if is_guest else None,
-        role="user", content=message,
-        context_type=context_type,
-        context_data=json.dumps(context_data) if context_data else None,
-    ))
-    db.session.commit()
+    # 保存用户消息（历史记录写入失败不影响流式响应，降级静默跳过）
+    try:
+        db.session.add(ChatHistory(
+            user_id=user.id if not is_guest else None,
+            guest_ip=user.ip if is_guest else None,
+            role="user", content=message,
+            context_type=context_type,
+            context_data=json.dumps(context_data) if context_data else None,
+        ))
+        safe_commit()
+    except Exception:
+        db.session.rollback()
 
     def generate():
         full_response = []
@@ -121,14 +125,17 @@ def send_message():
             return
 
         assistant_content = "".join(full_response)
-        db.session.add(ChatHistory(
-            user_id=user.id if not is_guest else None,
-            guest_ip=user.ip if is_guest else None,
-            role="assistant", content=assistant_content,
-            context_type=context_type,
-            context_data=json.dumps(context_data) if context_data else None,
-        ))
-        db.session.commit()
+        try:
+            db.session.add(ChatHistory(
+                user_id=user.id if not is_guest else None,
+                guest_ip=user.ip if is_guest else None,
+                role="assistant", content=assistant_content,
+                context_type=context_type,
+                context_data=json.dumps(context_data) if context_data else None,
+            ))
+            safe_commit()
+        except Exception:
+            db.session.rollback()
         yield f"data: {json.dumps({'done': True})}\n\n"
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
@@ -153,11 +160,14 @@ def history():
 @require_role(["admin", "user", "guest"])
 def clear_history():
     user = request.current_user
-    if user.role == "guest":
-        ChatHistory.query.filter_by(guest_ip=user.ip).delete()
-    else:
-        ChatHistory.query.filter_by(user_id=user.id).delete()
-    db.session.commit()
+    try:
+        if user.role == "guest":
+            ChatHistory.query.filter_by(guest_ip=user.ip).delete()
+        else:
+            ChatHistory.query.filter_by(user_id=user.id).delete()
+        safe_commit()
+    except Exception:
+        db.session.rollback()
     return jsonify({"success": True})
 
 

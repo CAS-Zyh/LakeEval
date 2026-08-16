@@ -1,10 +1,15 @@
 import json
 import os
+import sys
 import requests
 from typing import Generator, Optional
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+def _project_root() -> str:
+    """统一从 config 获取项目根绝对路径，避免不同入口下 __file__ 层级不同造成错位。"""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from config import get_project_root
+    return get_project_root()
 
 
 class DeepSeekClient:
@@ -22,7 +27,10 @@ class DeepSeekClient:
         if enabled:
             from .kb import get_knowledge_base
             self._kb = get_knowledge_base(kb_dir, chunk_size, overlap, top_k, min_score)
-            self._kb.load(_PROJECT_ROOT)
+            try:
+                self._kb.load(_project_root())
+            except Exception:
+                self._kb = None  # 知识库加载失败不阻断主流程
         else:
             self._kb = None
 
@@ -30,7 +38,10 @@ class DeepSeekClient:
         """检索知识库，返回 [{"source":..., "content":..., "score":...}]。"""
         if not self._kb or not self._kb_config:
             return []
-        hits = self._kb.query(question, _PROJECT_ROOT)
+        try:
+            hits = self._kb.query(question, _project_root())
+        except Exception:
+            return []
         if not hits:
             return []
         return [

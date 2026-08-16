@@ -17,6 +17,12 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 请求体上限 2MB
+    # 避免 SQLite 连接池问题（尤其是内存数据库跨线程/多 worker 场景）
+    if DATABASE_URI.strip().lower().startswith("sqlite:///"):
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+            "connect_args": {"check_same_thread": False},
+            "pool_pre_ping": True,
+        }
 
     # CORS 白名单：只允许指定的前端来源
     CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=False)
@@ -43,6 +49,20 @@ def create_app():
                 "code": "RATE_LIMITED",
             }), 429
 
+    # --- 统一服务状态端点（供前端查询：是否内存模式/版本） ---
+    @app.route("/api/status", methods=["GET"])
+    def _status():
+        from config import DB_EPHEMERAL
+        return jsonify({
+            "success": True,
+            "data": {
+                "ok": True,
+                "db_ephemeral": DB_EPHEMERAL,
+                "db_uri_masked": _mask_uri(DATABASE_URI),
+                "server_time": datetime.utcnow().isoformat() + "Z",
+            },
+        })
+
     from .routes.auth import auth_bp
     from .routes.tli import tli_bp
     from .routes.bqi import bqi_bp
@@ -59,25 +79,51 @@ def create_app():
     app.register_blueprint(chat_bp, url_prefix="/api/chat")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
+    # 建表 + 初始化默认管理员（捕获所有异常，保证即便在只读文件系统中服务仍可启动）
     with app.app_context():
-        db.create_all()
-        _init_default_admin()
+        try:
+            db.create_all()
+        except Exception as e:  # noqa: BLE001 - 启动期任何 DB 问题都不能崩
+            app.logger.warning(f"[DB] db.create_all() 跳过（{type(e).__name__}: {str(e)[:120]}）")
+        try:
+            _init_default_admin()
+        except Exception as e:
+            app.logger.warning(f"[DB] 默认管理员初始化跳过（{type(e).__name__}: {str(e)[:120]}）")
 
     return app
+
+
+def _mask_uri(uri: str) -> str:
+    """脱敏数据库连接串，避免泄露密码。"""
+    if not uri:
+        return ""
+    # sqlite 直接返回
+    if uri.startswith("sqlite"):
+        return uri
+    # postgres/mysql: 隐藏 :password@ 中间的密码部分
+    import re
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", uri, count=1)
 
 
 def _init_default_admin():
     from .models import User
     from config import DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD
-    if not User.query.filter_by(username=DEFAULT_ADMIN_USERNAME).first():
-        admin = User(
-            username=DEFAULT_ADMIN_USERNAME,
-            role="admin",
-            daily_chat_limit=-1,
-        )
-        admin.set_password(DEFAULT_ADMIN_PASSWORD)
-        db.session.add(admin)
-        db.session.commit()
+    from .safe_db import safe_add
+
+    existing = User.query.filter_by(username=DEFAULT_ADMIN_USERNAME).first()
+    if existing:
+        return
+    admin = User(
+        username=DEFAULT_ADMIN_USERNAME,
+        role="admin",
+        daily_chat_limit=-1,
+    )
+    admin.set_password(DEFAULT_ADMIN_PASSWORD)
+    ok, err = safe_add(admin, commit=True)
+    if not ok:
+        # 内存数据库中应成功；若失败（只读文件系统），不抛异常，服务仍可启动
+        import logging
+        logging.getLogger(__name__).warning("默认管理员创建失败：%s", err)
 
 
 if __name__ == "__main__":

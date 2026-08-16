@@ -47,6 +47,20 @@ if user:
 
     st.sidebar.divider()
 
+    # --- 无状态环境提醒 ---
+    srv = api.status()
+    if srv and srv.get("db_ephemeral"):
+        st.markdown("""
+        <div style="padding:0.75rem 1rem;background:#fff8e1;border:1px solid #f9d87a;
+                    border-radius:8px;margin-bottom:1.2rem;color:#8a5a00;font-size:0.85rem;">
+            <strong>⚠️ 当前为临时演示模式（无持久化数据库）</strong><br>
+            注册用户、历史记录、对话历史等数据在服务重启后将被清空。
+            如需持久化，请在 Render 控制台「Disks」挂载磁盘到
+            <code>/opt/render/project/src/instance</code>，并设置
+            <code>DATABASE_URI=sqlite:///instance/lake_eval.db</code>。
+        </div>
+        """, unsafe_allow_html=True)
+
     st.markdown("""
     <div style="display:flex;align-items:center;justify-content:space-between;
                 padding:1rem 1.5rem;background:#fff;border:1px solid #e5e7eb;

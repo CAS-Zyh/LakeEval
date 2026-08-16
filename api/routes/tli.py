@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify
 from ..auth import require_auth
 from ..extensions import db
 from ..models import CalculationRecord
+from ..safe_db import safe_commit
 from core.tli_model import evaluate_tli, tli_grade, back_calculate_target
 
 tli_bp = Blueprint("tli", __name__)
@@ -24,15 +25,19 @@ def calculate():
     result["grade_name"] = grade_name
     result["grade_color"] = grade_color
 
+    # 注册用户保存记录；写入失败降级为不保存（不影响计算结果返回）
     if request.current_user.id is not None:
-        record = CalculationRecord(
-            user_id=request.current_user.id,
-            type="tli",
-            input_data=json.dumps(values),
-            result=json.dumps(result),
-        )
-        db.session.add(record)
-        db.session.commit()
+        try:
+            record = CalculationRecord(
+                user_id=request.current_user.id,
+                type="tli",
+                input_data=json.dumps(values),
+                result=json.dumps(result),
+            )
+            db.session.add(record)
+            safe_commit()
+        except Exception:
+            db.session.rollback()
     return jsonify({"success": True, "data": result})
 
 

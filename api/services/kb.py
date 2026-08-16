@@ -123,9 +123,23 @@ class KnowledgeBase:
 
     # ---------- 加载 / 索引 ----------
     def load(self, project_root: str) -> int:
-        """扫描 knowledge_base 目录并建立索引。返回索引块数。"""
-        kb_abs = os.path.join(project_root, self.kb_dir) if not os.path.isabs(self.kb_dir) else self.kb_dir
-        os.makedirs(kb_abs, exist_ok=True)
+        """扫描 knowledge_base 目录并建立索引。返回索引块数。
+
+        注意：知识库文件随代码仓库一起提交（只读），所以此处绝不创建或写入本地目录，
+        避免在无状态只读云端环境中触发 PermissionError。若目录不存在，直接返回 0。
+        """
+        import sys, os as _os
+        sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
+        from config import get_kb_abs_path
+
+        kb_abs = get_kb_abs_path()
+
+        # 绝不创建目录（只读）。目录不存在则视为空知识库
+        if not os.path.isdir(kb_abs):
+            self.chunks = []
+            self.idf = None
+            self.tfidf_matrix = None
+            return 0
 
         # 收集所有 .txt / .md
         files = []
@@ -141,7 +155,10 @@ class KnowledgeBase:
             return 0
 
         # 按文件修改时间判断是否需要重索引（简单 mtime 比较）
-        current_mtimes = {f: os.path.getmtime(f) for f in files}
+        try:
+            current_mtimes = {f: os.path.getmtime(f) for f in files}
+        except OSError:
+            current_mtimes = {}
         need_reload = (
             set(current_mtimes) != set(self._mtime_by_file) or
             current_mtimes != self._mtime_by_file
@@ -153,11 +170,14 @@ class KnowledgeBase:
         all_chunks: List[Chunk] = []
         for f in files:
             try:
-                with open(f, "r", encoding="utf-8") as fp:
-                    text = fp.read()
-            except UnicodeDecodeError:
-                with open(f, "r", encoding="gbk", errors="ignore") as fp:
-                    text = fp.read()
+                try:
+                    with open(f, "r", encoding="utf-8") as fp:
+                        text = fp.read()
+                except UnicodeDecodeError:
+                    with open(f, "r", encoding="gbk", errors="ignore") as fp:
+                        text = fp.read()
+            except (OSError, PermissionError):
+                continue
             doc_id = os.path.relpath(f, kb_abs)
             doc_name = os.path.basename(f)
             all_chunks.extend(_split_into_chunks(doc_id, doc_name, text,

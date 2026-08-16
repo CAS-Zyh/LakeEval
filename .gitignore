@@ -1,6 +1,48 @@
+# ---- Python 编译产物 ----
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# ---- 数据库 & 实例 ----
 instance/
-.env
-.venv/
 *.db
+*.sqlite
+*.sqlite3
+
+# ---- 敏感配置 ----
+.env
+.env.local
+.env.*.local
+.secrets
+*.key
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Streamlit 缓存 ----
+.streamlit/cache/
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# ---- 编辑器 / IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- 日志 ----
+*.log
+logs/
+
+# ---- 系统 / 临时 ----
+.DS_Store
+Thumbs.db
+tmp/
+temp/
+*.tmp
+*.bak

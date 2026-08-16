@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify
 from ..auth import require_auth
 from ..extensions import db
 from ..models import CalculationRecord
+from ..safe_db import safe_commit
 from core.bqi_model import calculate_bqi, bqi_grade, get_species_list, BQI_GRADE_CRITERIA
 
 bqi_bp = Blueprint("bqi", __name__)
@@ -26,14 +27,17 @@ def calculate():
     }
 
     if request.current_user.id is not None:
-        record = CalculationRecord(
-            user_id=request.current_user.id,
-            type="bqi",
-            input_data=json.dumps(species_counts),
-            result=json.dumps(result),
-        )
-        db.session.add(record)
-        db.session.commit()
+        try:
+            record = CalculationRecord(
+                user_id=request.current_user.id,
+                type="bqi",
+                input_data=json.dumps(species_counts),
+                result=json.dumps(result),
+            )
+            db.session.add(record)
+            safe_commit()
+        except Exception:
+            db.session.rollback()
     return jsonify({"success": True, "data": result})
 
 

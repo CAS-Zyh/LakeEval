@@ -1,11 +1,26 @@
-streamlit>=1.30
-flask>=3.0
-flask-sqlalchemy>=3.1
-flask-cors>=4.0
-pyjwt>=2.8
-werkzeug>=3.0
-requests>=2.31
-plotly>=5.18
-numpy>=1.26
-python-dotenv>=1.0
-gunicorn>=21.2  # Render 部署用（本地开发不需要）
+# 完整依赖清单 — 兼容本地开发 & Render/Streamlit Cloud 云端免费环境
+# 所有第三方库（不含 Python 标准库）
+# Python 版本要求：>= 3.10
+
+# --- Web 框架 ---
+streamlit>=1.30,<2                 # 前端 UI 多页面应用
+flask>=3.0,<4                      # 后端 REST API
+flask-sqlalchemy>=3.1,<4           # ORM（支持内存 SQLite & 回退兜底）
+flask-cors>=4.0,<5                 # CORS 白名单控制
+
+# --- 安全 / 认证 ---
+pyjwt>=2.8,<3                      # JWT 生成与验证（用户/游客 token）
+werkzeug>=3.0,<4                   # 密码哈希（generate_password_hash）
+
+# --- HTTP & 配置 ---
+requests>=2.31,<3                  # DeepSeek / 后端相互调用（chat_widget.py 也用）
+python-dotenv>=1.0,<2              # .env 加载
+
+# --- 科学计算 ---
+numpy>=1.26,<2                     # TLI 计算 & TF-IDF 矩阵 & 绘图数组
+
+# --- 可视化 ---
+plotly>=5.18,<6                    # 雷达图 / 函数曲线 / 贡献条（Streamlit 原生支持）
+
+# --- 生产部署 WSGI（本地不需要，Render 部署时用）---
+gunicorn>=21.2                     # Render Start Command: gunicorn wsgi:app --bind 0.0.0.0:$PORT -w 2
