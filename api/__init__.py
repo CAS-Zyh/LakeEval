@@ -24,8 +24,21 @@ def create_app():
             "pool_pre_ping": True,
         }
 
-    # CORS 白名单：只允许指定的前端来源
-    CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=False)
+    # CORS 白名单：精确域名 + 通配子域（例如 https://*.streamlit.app）
+    # Flask-CORS origins 支持字符串列表 + 正则；我们把带 * 的条目编译成 re.compile()
+    import re as _re
+    def _normalize_origins(raw_list):
+        normalized = []
+        for o in raw_list:
+            if "*" in o:
+                pattern = "^" + _re.escape(o).replace(r"\*", r"[^.]+" if o.startswith("*.") else r".*") + "$"
+                normalized.append(_re.compile(pattern))
+            else:
+                normalized.append(o)
+        return normalized
+
+    _cors_origins = _normalize_origins(ALLOWED_ORIGINS)
+    CORS(app, origins=_cors_origins, supports_credentials=False, resources={r"/*": {"origins": _cors_origins}})
 
     db.init_app(app)
 
@@ -50,7 +63,10 @@ def create_app():
             }), 429
 
     # --- 统一服务状态端点（供前端查询：是否内存模式/版本） ---
+    # 暴露两条路径：/api/status（标准 API 前缀）和 /status（启动健康检查裸路径）
+    # 两者返回值完全一致，避免不同调用方路径约定不一致造成 404。
     @app.route("/api/status", methods=["GET"])
+    @app.route("/status", methods=["GET"])
     def _status():
         from config import DB_EPHEMERAL
         return jsonify({

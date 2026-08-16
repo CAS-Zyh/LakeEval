@@ -1,290 +1,240 @@
 # 部署手册 · 淮河流域中心生态室 — LakeEval
 
-> 架构：**前后端分离部署**，两个独立服务通过 HTTPS 通信。
-> - **Render**：托管 Flask 后端 API + 计算 + AI + 数据
-> - **Streamlit Cloud**：托管 Streamlit 前端 UI（多页面应用）
-> - AI Key 只保存在 Render 后端，**永远不会被发送到用户浏览器**。
+> 2026-08 版本，**0 成本、无需 VISA 信用卡**。
+>
+> 架构：**Streamlit Cloud 单体部署**（前后端共用一个免费实例容器）
+> - 前端：Streamlit UI（多页面应用，用户直接访问）
+> - 后端：Flask API（作为 UI 子进程在 `127.0.0.1:5001` 启动，不对外暴露，更安全）
+> - AI Key 只保存在容器内部，通过 Secrets 注入，**永远不会被发送到用户浏览器**。
+>
+> 如果未来有 VISA / 想做大规模稳定部署，再参考文末「附录：切换到 Render + Streamlit 分离部署」即可。
 
-预计部署时间：30 ~ 60 分钟（含平台构建等待）。
+预计部署时间：20 分钟（含平台构建等待）。
 
 ---
 
 ## 0. 部署前检查清单
 
-- [ ] GitHub 仓库 `CAS-Zyh/LakeEval` 的 `main` 分支已包含：`api/`、`core/`、`ui/`、`config.py`、`wsgi.py`、`requirements.txt`、`.gitignore`
-- [ ] 已注册 **Render**（render.com）账号（支持 GitHub OAuth 登录）
-- [ ] 已注册 **Streamlit Cloud**（share.streamlit.io）账号（支持 GitHub OAuth 登录）
-- [ ] 准备 ≥ 2 条随机字符串：1 条 ≥ 32 字符（JWT 密钥）、1 条 AI 平台 API Key（可选，不填 AI 助手页面仅关闭对话功能）
+- [ ] GitHub 仓库 `CAS-Zyh/LakeEval` 的 `main` 分支已包含：`api/`、`core/`、`ui/`、`ui/flask_bootstrap.py`、`config.py`、`wsgi.py`、`requirements.txt`、`.gitignore`
+- [ ] 已注册 **Streamlit Cloud** 账号（share.streamlit.io，支持 GitHub OAuth 登录，**不需要信用卡**）
+- [ ] 准备 ≥ 1 条 ≥ 32 字符的随机字符串（JWT 密钥）；以及 AI 平台的 API Key（可选，不填 AI 助手只降级关闭对话功能，核心计算仍可使用）
 
 ---
 
 ## 1. 架构总览
 
 ```
-用户浏览器 ──────► Streamlit Cloud (前端 UI)
-                        │
-                        │ HTTP (带 /api 前缀)
-                        ▼
-                   Render (Flask API)
-                    ├─ TLI / BQI / 削减方案 计算
-                    ├─ 注册/登录/额度/JWT
-                    ├─ AI 对话 (调用上游平台)
-                    └─ 知识库 RAG (纯内存索引)
-
-                   [可选持久化] Render Persistent Disk
-                    └─ /opt/render/project/src/instance/
-                         └─ lake_eval.db   ← SQLite
+ 外部浏览器 (用户)          Streamlit Cloud 免费容器 (1 CPU / 1 GB RAM)
+ ────────────────────       ──────────────────────────────────────────
+ │  share.streamlit.io  │──▶│  Streamlit 进程 (前端 UI, 8501)          │
+ │  (https://xxx.)      │   │    ├─ Sidebar / Pages / Components       │
+ │                      │   │    ├─ 机构标题 / 演示模式横幅             │
+ │                      │   │    └─ UI -> localhost:5001 (内部回环)     │
+ │                      │   │                                          │
+ │                      │   │       Flask 子进程 (后端 API, 127.0.0.1)  │
+ │                      │   │        ├─ TLI / BQI / 削减计算            │
+ │                      │   │        ├─ JWT / 额度 / 游客 Token         │
+ │                      │   │        ├─ AI 助手 (调用上游平台)           │
+ │                      │   │        ├─ 知识库 RAG (纯内存 TF-IDF)       │
+ │                      │   │        └─ 内存 SQLite (重启重置)           │
+ ────────────────────       ──────────────────────────────────────────
 ```
-
-两种运行模式：
 
 | 模式 | 费用 | 持久化 | 推荐场景 |
 |------|------|--------|---------|
-| **A. 临时演示（免费无盘）** | ¥0 | ❌ 重启后注册用户/记录/历史全部清空 | 演示 / 临时评审 / 短时间展示 |
-| **B. 正式运行（1GB 磁盘）** | ~¥7–15 / 月 | ✅ | 长期稳定使用 |
+| **临时演示（免费）** | ¥0 / 月 | ❌ 容器休眠/重启 → 注册用户/记录/历史清空（约 7 天闲置会休眠） | 演示 / 临时评审 / 短时间展示 — **默认模式** |
+
+> ⚠️ Streamlit Cloud 免费实例**不提供持久化磁盘**。如果需要保存注册用户和计算记录，只有两条路：
+> （a）购买一台国内轻量云服务器，把 SQLite DB 文件挂载到持久盘；
+> （b）切换到「附录：Render + Streamlit 分离部署」（Render 需要信用卡，最便宜 Starter + 1GB 磁盘 ~$14/月）。
 
 ---
 
-## 2. Step A · Render 部署 Flask 后端（含临时演示模式）
+## 2. Streamlit Cloud 单体部署（0 成本，无需 VISA）
 
-### 2.1 创建 Web Service
+### 2.1 登录 / 创建 App
 
-1. 打开 <https://render.com> → 用 **GitHub 账号**登录（授权 `CAS-Zyh/LakeEval` 仓库访问权限）
-2. 点击右上角 **New +** → **Web Service**
-3. 在仓库列表中找到 **`CAS-Zyh/LakeEval`** → 点 **Connect**
+1. 打开 <https://share.streamlit.io> → 点击 **Sign in with GitHub**（授权 CAS-Zyh 账号）
+2. 同意两次授权：**GitHub 访问权限 + 读取邮箱**
+3. 登录后进入 **Apps** 面板 → 点击右上角 **「New app」** 按钮
 
-### 2.2 基础配置
+### 2.2 配置 App
 
-| 字段 | 值 | 说明 |
-|------|----|------|
-| **Name** | `lakeeval-api`（或自定义） | 这个名字决定子域名：`https://<NAME>.onrender.com` |
-| **Region** | `Singapore`（或离你最近的） | 影响请求延迟 |
-| **Runtime** | `Python 3` | |
-| **Branch** | `main` | |
-| **Build Command** | `pip install -r requirements.txt` | |
-| **Start Command** | `gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 2` | |
-| **Instance Type** | 免费选 `Free`（演示 15 分钟休眠）；长期运行选 `Starter`（$7/月） | Free 首次访问会冷启动 20~40s |
+按下方表格逐项填写（这是最核心的一步）：
 
-### 2.3 Environment Variables（必填）
+| 字段 | 你要填的值 |
+|---|---|
+| **Repository** | 下拉选择：`CAS-Zyh/LakeEval` |
+| **Branch** | 下拉选择：`main` |
+| **Main file path** | ⚠️ **手动输入：`ui/app.py`**（不要选根目录文件！Streamlit 多页面系统的根是这个文件所在目录，否则 pages/ 侧边栏会无法显示）|
+| **Advanced settings...** | 点击展开（下一步 Secrets 就在这里） |
+| **Python version** | 选 `3.11` 或 `3.12` 都可以（`3.11` 兼容性更好）|
 
-滚动到 **Environment** 区块 → **Add Environment Variable** 逐个添加：
+### 2.3 填入 Secrets（可选但强烈建议 3 条）
 
-> ⚠️ **变量名区分大小写**，建议直接复制下列 Key。
-
-| Key | 示例 Value | 说明 |
-|-----|-----------|------|
-| `FLASK_HOST` | `0.0.0.0` | ✅ Render 必须允许外部流量接入 |
-| `FLASK_PORT` | `5001` | ✅ 本地用，线上会被 Render `$PORT` 覆盖 |
-| `JWT_SECRET` | `≥32 位随机字符串` | ✅ 请自行生成并妥善保存 |
-| `DEEPSEEK_API_KEY` 或对应供应商 Key | 从 AI 平台获取 | 不填则 AI 助手不工作，但 TLI/BQI/削减方案等核心功能仍然可用 |
-| `ALLOWED_ORIGINS` | `http://localhost:8501,https://<你的Streamlit域名>.streamlit.app` | 先占位，拿到 Streamlit 域名后 **务必回填** |
-| `RATE_LIMIT_PER_MINUTE` | `60` | 全局每分钟速率限制 |
-| `KB_ENABLED` | `true` | 启用本地知识库 |
-
-下面两项用来控制运行模式（二选一）：
-
-#### A.1 · 临时演示模式（免费无盘）✅ 推荐第一次部署用
-
-```
-DATABASE_URI   =  sqlite:///:memory:
-```
-- 默认就是这个值（不填也行）
-- 所有计算正常工作，AI 对话可用
-- **每次 Render 重启 → 数据库重置为空白**，注册用户/记录/历史全部丢失
-- UI 顶部会自动显示 ⚠️ **临时演示模式**条幅，明确告诉用户
-
-#### A.2 · 正式运行模式（持久化）
-
-先做下一步 2.4 挂载磁盘 → 再设置：
-```
-DATABASE_URI   =  sqlite:///instance/lake_eval.db
-```
-
-### 2.4 （正式模式必填）挂载 Persistent Disk
-
-> 这是把数据库「永久保存」的唯一方法，否则 Render 每次冷启动/重启都会把磁盘清空。
-
-滚动到 **Disks** → 点击 **Add Disk**：
-
-| 字段 | 值 |
-|------|----|
-| Name | `lakeeval-db` |
-| Mount Path | **`/opt/render/project/src/instance`** （必须完全一致，不能多斜杠/少斜杠） |
-| Size | `1 GB`（对于 SQLite 绰绰有余） |
-
-> **为什么是这个路径？** `sqlite:///instance/lake_eval.db` 是 Flask-SQLAlchemy 的「相对于 app.instance_path」写法；在 Render + gunicorn + wsgi.py 下，`app.instance_path` 就是项目根下的 `instance/` 目录，即 `/opt/render/project/src/instance`。
-
-### 2.5 点击 Create Web Service，等待构建
-
-构建成功标志：
-- 日志最后出现类似 `Booting gunicorn worker with pid: ...` 或 `Listening at: http://0.0.0.0:xxxxx`
-- 浏览器打开 `https://<你的NAME>.onrender.com/api/status`，返回 JSON：
-  ```json
-  {"success":true,"data":{"ok":true,"db_ephemeral":true,"db_uri_masked":"sqlite:///:memory:","server_time":"...Z"}}
-  ```
-- （正式模式）`db_ephemeral` 会是 `false`，`db_uri_masked` 会显示 `sqlite:///instance/...`
-
-记下这个 API 根地址（例子：`https://lakeeval-api.onrender.com`），下一步 Streamlit 要用到。
-
----
-
-## 3. Step B · Streamlit Cloud 部署前端 UI
-
-### 3.1 创建 App
-
-1. 打开 <https://share.streamlit.io> → **Sign in with GitHub**（同账号 `CAS-Zyh`）
-2. 首次登录同意授权 `repo` + `private email`
-3. 点击 **New app**
-
-### 3.2 填写配置
-
-| 字段 | 值 |
-|------|-----|
-| Repository | `CAS-Zyh/LakeEval`（下拉选择） |
-| Branch | `main` |
-| Main file path | **手动输入 `ui/app.py`**（⚠️ 不是根目录！Streamlit 多页面根是这个文件所在目录） |
-| App URL（可自定义） | 比如 `huaihe-lakeeval`，最终地址是 `https://huaihe-lakeeval.streamlit.app`（记下这个） |
-
-### 3.3 告诉前端「后端在哪里」（Secrets）
-
-> ⚠️ 这是部署最容易出错的一步：**前端是另一个独立服务**，它必须知道后端 Render 的 API 地址。
-
-点 **Advanced settings...** → 找到 **Secrets** 输入框 → 粘贴下面内容（替换成你自己的 Render 域名）：
+在 Advanced settings → **Secrets** 输入框里，粘贴下面内容，然后**替换等号右边的值**：
 
 ```toml
-# 注意：域名后必须带 /api，且末尾没有 /
-API_BASE_URL = "https://lakeeval-api.onrender.com/api"
+# ============================================================
+# LakeEval Secrets — 单体部署模式下最低只要配置 jwt_secret
+# AI Key 是可选项，不填也完全可以：TLI/BQI/削减方案/知识库/记录功能照常使用
+# ============================================================
+
+# 1. [必填] JWT 密钥：请你自己编一段 ≥ 32 字符的随机字符串（不要写在 README 里）
+jwt_secret = "把这替换成≥32字符随机字符串比如我随手写的8861a1b6c09d1c8fe1c2f1a3a0b5c8d6e9f0a1b2c3d4e5f6"
+
+# 2. [可选] AI 平台 Key — 想让 AI 助手真正对话就填；否则 AI 助手会提示未配置
+#    例：deepseek_api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# deepseek_api_key = "在这填入你的Key"
+
+# 3. [可选] 每日 AI 对话额度限制（如果你怕烧太快）— 以下都是默认值，按需改
+# guest_daily_chat_limit = "5"   # 游客（未登录）每日对话次数
+# user_daily_chat_limit = "10"   # 注册普通用户每日对话次数
+# guest_max_tokens = "500"       # 游客每次对话 token 上限
+
+# 4. [不用动] 以下在单体模式下保持默认值即可
+# database_uri = "sqlite:///:memory:"   # 单体模式只支持内存 DB
 ```
 
-### 3.4 点击 Deploy
+> **说明**：为什么不用填 `api_base_url`？  
+> 因为在**单体部署**模式下，前后端运行在同一个容器里，Flask 由 `ui/flask_bootstrap.py` 自动在 `127.0.0.1:5001` 启动，UI 直接本机回环请求 → 不需要配置外部 API 地址、不需要配置 CORS 源、不需要第二个平台账号。✅
+
+### 2.4 点击 **「Deploy」**，等 2~5 分钟
+
+首次构建会下载 streamlit/flask/numpy 等依赖，耐心等待。
 
 成功标志：
-- 自动跳转到 `https://huaihe-lakeeval.streamlit.app` 页面
-- 侧边栏顶部显示 **「淮河流域中心生态室」**
-- 如果后端还是临时演示模式，首页会有 ⚠️ 黄色条幅
-- 侧栏显示 **「游客」** 身份（或可展开登录面板）
+- 浏览器自动跳转到 `https://<你的应用名>.streamlit.app` 页面
+- 侧栏顶部显示 **「淮河流域中心生态室」** 蓝字
+- 首页顶部会有 ⚠️ **「当前为临时演示模式（单体部署）」** 黄色条幅（正常现象）
+- 侧栏显示「游客（游客）」身份
+
+### 2.5 自定义域名（可选）
+
+在 Apps 列表里 → 你这个 App 右侧点 **⋯** → **Settings** → **Custom domain** → 按提示在 DNS 服务商（如阿里云/Cloudflare）添加 CNAME 记录，然后填你的域名，Streamlit Cloud 会自动签发 HTTPS 证书。
 
 ---
 
-## 4. Step C · 回填 CORS 白名单（必须）
-
-前端域名现在确定了（比如 `https://huaihe-lakeeval.streamlit.app`），要告诉 Render 后端只允许这个域名跨域调用：
-
-1. 回到 Render 控制台 → `lakeeval-api` 服务 → **Environment**
-2. 找到 `ALLOWED_ORIGINS`，把值替换为：
-   ```
-   http://localhost:8501,https://huaihe-lakeeval.streamlit.app
-   ```
-   （如果有自定义 CNAME 域名，也一并加到逗号后面）
-3. 点 **Save Changes** → Render 会自动重新部署 1 分钟
-
-> 不填会怎样？浏览器 F12 → Console 会报红色 `CORS` / `Access-Control-Allow-Origin` 错误 → 所有需要鉴权的功能（计算记录保存、AI 对话、登录注册等）失败。
-
----
-
-## 5. Step D · 功能验证清单
-
-打开 Streamlit 前端域名，按顺序测试：
+## 3. 功能验证清单（部署完必跑）
 
 | # | 项目 | 操作 | 预期 |
 |---|------|------|------|
-| 1 | 游客身份 | 直接打开 | 侧栏显示「游客」，不强制登录 |
-| 2 | TLI 计算 | 拖动侧栏滑条 → 点击计算 | 数值更新 + 雷达图/贡献条 |
-| 3 | TLI 双向同步 | 改滑条 → 数字框同值；改数字框 → 滑条同位置 | 实时同步 |
-| 4 | BQI 计算 | 填 3 种底栖 → 点击计算 | 输出 BQI 值 + 等级徽章 |
-| 5 | 削减方案 | 目标 TLI 60 → 智能反推 | 限制因子诊断卡 + 方案 + 对比雷达 |
-| 6 | 演示模式提示 | 首页顶部 | 临时模式 ⚠️ 条幅；正式模式无 |
-| 7 | 计算记录导出 | 做几次计算 → 历史页 → 导出 CSV | CSV 下载成功 |
-| 8 | AI 助手 | 提问「什么是 TLI」 | 流式回复；必要时引用本地知识库 |
-| 9 | 安全 | F12 → 搜索 `sk-` 或 API Key 字符串 | **任何请求和响应都不应出现明文 Key** |
+| 1 | 游客身份 | 直接打开域名 | 侧栏显示「游客」，不强制登录 |
+| 2 | 无状态横幅 | 首页顶部 | ⚠️ 黄色「临时演示模式（单体部署）」提示 |
+| 3 | TLI 计算 | 拖动侧栏 5 个指标滑条 → 点「计算 TLI」 | 右侧显示数值 + 雷达图 + 等级徽章 |
+| 4 | 双向同步 | 先改滑条位置 → 再看右边数字框；清空数字框手动输入 → 看滑条 | 两者实时一致 |
+| 5 | BQI 计算 | 下拉物种 3 种 + 填写密度 → 点计算 | BQI 值 + 分级 |
+| 6 | 削减方案 | 切到「目标 TLI → 智能反推」→ 目标 60 → 开始模拟 | 限制因子（两步法诊断卡片）+ 方案表 + 对比雷达图 |
+| 7 | 历史记录 | 做 2~3 次 TLI 计算 → 切到历史记录 | 列表里能看到，可导出 CSV |
+| 8 | AI 助手（已填 Key） | 提问：「两步法营养限制诊断是什么」 | 流式回复 → 回复中引用了本地知识库 00_湖库富营养化专业知识 文档 |
+| 9 | AI 助手（未填 Key） | 提问任何问题 | 返回「DeepSeek API Key 未配置」提示，不崩不 500 |
+| 10 | 游客用量 | 连续 6 次 AI 对话（已填 Key 情况下） | 第 6 次提示「今日游客额度已用完」，不泄露 Key |
 
 ---
 
-## 6. 日常更新流程
+## 4. 日常更新流程
 
-代码改动 → **推送到 GitHub main 即可**，两边都是自动重新部署：
+代码改动 → **推送到 GitHub main 即可**，Streamlit Cloud 自动 Reboot：
 
 ```bash
 cd 本地/LakeEval
-git add .
-git commit -m "fix: 调整削减方案中TP权重"
+git add -A
+git commit -m "fix: 调整TP削减权重至0.79"
 git push -u origin main
 ```
 
-- Render：自动检测 push → 重新 `pip install` + 重启（1~3 分钟）
-- Streamlit：自动 Reboot app（20~60s）
+刷新网页确认功能变化即可（Reboot 通常 30~60s 内完成，期间页面显示 reboot banner）。
 
-刷新网页确认版本变化。
+### 更新知识库
 
-### 知识库更新
+把新的 `.txt/.md` 放进 `knowledge_base/` → 提交推送 → **不需要额外操作**，容器 Reboot 后 Flask 自动重新索引。
 
-把新的 `.txt/.md` 放进 `knowledge_base/` 目录 → 提交推送：
-```bash
-git add knowledge_base/我的新文档.md
-git commit -m "docs: 新增淮河流域2025生态报告"
-git push
+---
+
+## 5. 常见故障排查
+
+### ❌ 首屏红色「后端服务启动失败（单体部署模式）」
+**原因**：Streamlit Cloud 容器内存不足、或第一次启动 Flask 子进程超时 30s  
+**修**：
+1. 右上角 **☰ → Settings → Redeploy this app**，强制重启一次
+2. 如果反复失败，看错误详情（点 ☰ → **Manage app** → 看 Build logs / Runtime logs 最后 20 行贴出来）
+3. 极少概率：Streamlit 免费实例的 CPU 跑满被节流，等几分钟再 Reboot 就好
+
+### ❌ AI 助手返回「DeepSeek API Key 未配置」
+**原因**：Secrets 里没填 `deepseek_api_key`，或者值前后有空格/换行  
+**修**：Apps → 你的 app → **Settings → Secrets → Edit**，检查：
+```toml
+deepseek_api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
-Render 重启后自动索引，无需手动操作。
+（注意引号前后不要多空格，等号前后空格可选；`sk-` 后 **别**有换行）→ Save 后会自动 Reboot。
+
+### ❌ 滑条数字框不同步（老版本遗留 bug，新版已修，但你看到）
+**修**：`git push -f` 把最新代码推上去，再手动 **Redeploy this app**。
+
+### ❌ 冷启动太慢
+Streamlit Cloud 免费实例闲置约 7 天休眠（不是 15 分钟，是大约 7 天），首次访问 20~60s 冷启动，正常现象。  
+**缓解**：用 UptimeRobot 等免费服务，每 3 天 GET 一次你的 `https://xxx.streamlit.app`，保持热度。
+
+### ❌ 想保留用户注册数据和计算历史
+Streamlit Cloud **不支持**持久化磁盘（免费/付费实例都无此功能），只能迁移架构：
+- 方案 1：阿里云 / 腾讯云轻量云服务器（国内访问快，2核/2G 约 ¥30/月），部署 SQLite 到磁盘
+- 方案 2：Render + Persistent Disk（需 VISA，约 $14/月，见附录）
+
+### ❌ Runtime logs 里看到 `Flask 子进程未在 30s 内就绪`
+首次启动 `pip install` + Flask 初始化超过 30s，导致 ui/flask_bootstrap.py 的等待超时。  
+**修**：直接点击 **Redeploy this app** 重开一次即可，第二次启动所有依赖已被 Streamlit 缓存，启动速度会快很多。
 
 ---
 
-## 7. 常见故障排查
+## 6. Secrets 完整参考（Streamlit Cloud → Settings → Secrets 中写）
 
-### ❌ Streamlit 页面一片红「无法连接服务器」
-**原因**：前端 `API_BASE_URL` 填错 / 后端还在冷启动  
-**修**：
-1. 单独打开 `https://你的Render子域名.onrender.com/api/status`，确认返回 JSON（先等后端完成冷启动）
-2. Streamlit 控制台 → Settings → Secrets → 检查 `API_BASE_URL` 必须是 `https://你的Render子域名.onrender.com/api`（**结尾有 `/api`，无尾斜杠 `/`**）
-3. 保存 → Streamlit 自动 Reboot
+> 全部都是「可选」，单体模式只写 `jwt_secret` 就能跑起来。
 
-### ❌ AI 助手回复 503「DeepSeek API Key 未配置」
-**原因**：Render 环境变量 `DEEPSEEK_API_KEY` 没填、或者值前后有空格  
-**修**：Render Environment 粘贴 Key 时确认没有换行或引号 → Save Changes → 重新部署后再测
-
-### ❌ 登录 / 保存记录报错「数据保存失败（临时模式）」
-**原因**：你运行在**临时演示模式**（`DATABASE_URI = sqlite:///:memory:`），DB 写操作被故意降级了，避免崩溃  
-**修**：
-- 临时模式就是这样的（正常的保护），**纯计算功能依然 100% 可用**；
-- 需要持久化 → 跳到 2.4 挂载 Persistent Disk → 升级 `DATABASE_URI` 为 `sqlite:///instance/lake_eval.db`
-
-### ❌ 冷启动太慢（免费层通病）
-Render Free 15 分钟无流量会休眠，首次访问 20~40s。  
-**缓解**：
-- 用 UptimeRobot 等免费服务，每 10 分钟 GET 一次 `https://<api>/api/status`，保持实例热乎
-- 或者升级到 Starter 实例（$7/月，永不休眠）
-
-### ❌ 正式模式：注册的用户第二天不存在
-**原因**：Persistent Disk 的 Mount Path 填错，数据库文件其实还是在临时文件系统里  
-**修**：Mount Path 必须完全是 **`/opt/render/project/src/instance`**，同时 `DATABASE_URI = sqlite:///instance/lake_eval.db`
+| Secrets Key（Toml 里的字段名） | 说明 | 默认值 |
+|---|---|---|
+| `jwt_secret` | JWT 签名密钥（**建议必填，≥ 32 字符**） | 内置开发占位密钥 |
+| `deepseek_api_key` | AI 平台 Key | 空 → AI 助手未配置模式 |
+| `deepseek_base_url` | 更换 AI 供应商 Base URL | `https://api.deepseek.com` |
+| `deepseek_model` | 更换模型名 | `deepseek-chat` |
+| `guest_daily_chat_limit` | 游客每日 AI 对话次数上限（按 IP 分组） | `5` |
+| `guest_max_tokens` | 游客单次 AI 请求最大 token | `500` |
+| `user_daily_chat_limit` | 注册用户每日 AI 对话次数 | `10` |
+| `database_uri` | **单体模式不要动**。要持久化需换服务器 | `sqlite:///:memory:` |
+| `rate_limit_per_minute` | 全局 IP 速率 | `60` |
+| `kb_enabled` | 启用知识库 | `true` |
+| `allowed_origins` | CORS 白名单（逗号分隔）— 单体部署不用填 | 默认已包含 `https://*.streamlit.app` + localhost |
+| `api_base_url` | **单体部署不要填**。分离部署才填，见附录 | 空 → `http://127.0.0.1:5001/api` |
+| `default_admin_username` | 首次启动时自动创建的管理员用户名 | 可留空 |
+| `default_admin_password` | 首次启动时自动创建的管理员密码（务必强密码） | 可留空 |
 
 ---
 
-## 8. Environment Variables 完整参考
+## 附录：切换到 Render + Streamlit 分离部署（需要 VISA，仅未来扩展用）
 
-（Render 控制台 Environment 面板中填写，敏感变量永远不要写进仓库）
+当出现以下情况时再切到此架构：
+1. 单体模式容器资源不足（Streamlit Cloud 免费 1GB RAM 不够同时跑 AI）
+2. 需要持久化保存注册用户 / 历史记录
+3. 需要自定义域名 CDN / WAF 等高级配置
 
-| Key | 默认值 | 说明 |
-|-----|--------|------|
-| `DATABASE_URI` | `sqlite:///:memory:` | `sqlite:///instance/lake_eval.db` 启用持久化 |
-| `FLASK_HOST` | `127.0.0.1` | Render 必须设 `0.0.0.0` |
-| `FLASK_PORT` | `5001` | Render 用 `$PORT` 覆盖 |
-| `JWT_SECRET` | — | ≥ 32 位随机串（线上必填） |
-| `DEEPSEEK_API_KEY` | — | AI 平台 Key（不填则 AI 助手降级） |
-| `ALLOWED_ORIGINS` | 本地 + Streamlit 域名 | 逗号分隔，**CORS 白名单** |
-| `RATE_LIMIT_PER_MINUTE` | `60` | 全局 IP 速率 |
-| `GUEST_DAILY_CHAT_LIMIT` | `5` | 游客每日对话上限（按 IP 分组） |
-| `USER_DAILY_CHAT_LIMIT` | `10` | 普通注册用户每日对话上限 |
-| `GUEST_MAX_TOKENS` | `500` | 游客单次 token 上限 |
-| `GUEST_TOKEN_EXPIRY_HOURS` | `2` | 游客 JWT 有效期 |
-| `KB_ENABLED` | `true` | 启用知识库 |
-| `KB_DIR` | `knowledge_base` | 知识库目录（相对项目根） |
-| `KB_CHUNK_SIZE` | `600` | 切块字符 |
-| `KB_CHUNK_OVERLAP` | `80` | 重叠字符 |
-| `KB_TOP_K` | `3` | 检索块数 |
-| `KB_MIN_SCORE` | `0.12` | 相似度阈值 |
-| `DEFAULT_ADMIN_USERNAME` | （可填） | 首次启动创建的管理员用户名 |
-| `DEFAULT_ADMIN_PASSWORD` | （可填） | 首次启动创建的管理员密码（线上务必为强密码） |
+**步骤（仅简介，完整手册保留旧版）**：
+
+1. **Render 部署 Flask**（需 VISA 身份验证）：
+   - Runtime = Python 3，Build = `pip install -r requirements.txt`，Start = `gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 2`
+   - Instance：Free 或 Starter
+   - Environment：加 `FLASK_HOST=0.0.0.0`、`DATABASE_URI=sqlite:///:memory:`（或挂磁盘后设 `sqlite:///instance/lake_eval.db`）
+   - Disks → 要持久化就 Add Disk：Mount Path = `/opt/render/project/src/instance`，Size 1GB
+   - 部署完成后记下 API 地址：`https://lakeeval-api.onrender.com`
+
+2. **Streamlit Cloud Secrets 切到分离模式**（Settings → Secrets）：
+   ```toml
+   jwt_secret = "和 Render 环境里的 JWT_SECRET 保持完全一致"
+   deepseek_api_key = "在 Render 环境里填的话，这里就不用重复填了"
+   api_base_url = "https://lakeeval-api.onrender.com/api"
+   ```
+   （api_base_url 结尾必须有 `/api`，无尾斜杠 `/`）
+
+3. **回填 CORS 白名单**：回到 Render → Environment → `ALLOWED_ORIGINS` → 追加 `https://<你的Streamlit域名>.streamlit.app` → Save 重新部署。
 
 ---
 
-部署过程中遇到问题，把对应平台（Render / Streamlit）**最后 20 行构建/运行日志**或**错误截图**贴出来，对照第 7 节即可定位。
+部署过程中遇到任何问题，把对应平台（主要是 Streamlit Cloud Runtime Logs 或 Build Logs）**最后 30 行日志**贴出来，对照第 5 节一般都能快速定位；定位不到就发给我看 🔧。

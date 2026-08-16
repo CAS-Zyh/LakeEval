@@ -7,6 +7,13 @@ from ui.theme import apply_theme
 from ui.auth import require_auth, current_user, logout_button, login_form
 from ui.api_client import api
 
+# ==== Streamlit Cloud 单体部署：启动时在容器内拉起 Flask 子进程 ====
+# 如果设置了 API_BASE_URL（分离部署），本步骤自动跳过；
+# 否则就在 127.0.0.1:5001 上起 Flask，前后端共用一个免费容器，0 成本无需 VISA。
+from ui.flask_bootstrap import ensure_flask_running  # noqa: E402
+
+_flask_ok = ensure_flask_running()
+
 st.set_page_config(
     page_title="淮河流域中心生态室 - 湖库富营养化评价系统",
     page_icon="🌊",
@@ -14,6 +21,15 @@ st.set_page_config(
 )
 
 apply_theme()
+
+# 启动阶段：把"后端未就绪"的错误先打到页面顶部，让用户一眼看到
+if not _flask_ok and not os.getenv("API_BASE_URL"):
+    st.error("""
+    **后端服务启动失败（单体部署模式）。**
+    可能原因：Streamlit Cloud 资源不足、配置错误、或 Flask 子进程异常退出。
+    请点击右上角 ☰ → **Settings** → **Redeploy this app** 手动重启应用；
+    如果多次失败，可切换到 **Settings → Secrets → 设置 API_BASE_URL** 指向独立后端。
+    """)
 
 # 侧边栏顶部：机构名称
 st.sidebar.markdown("""
@@ -47,19 +63,32 @@ if user:
 
     st.sidebar.divider()
 
-    # --- 无状态环境提醒 ---
+    # --- 无状态环境提醒 / 单体模式提醒 ---
     srv = api.status()
+    base_override = os.getenv("API_BASE_URL", "").strip()
+    is_mono = not base_override
     if srv and srv.get("db_ephemeral"):
-        st.markdown("""
-        <div style="padding:0.75rem 1rem;background:#fff8e1;border:1px solid #f9d87a;
-                    border-radius:8px;margin-bottom:1.2rem;color:#8a5a00;font-size:0.85rem;">
-            <strong>⚠️ 当前为临时演示模式（无持久化数据库）</strong><br>
-            注册用户、历史记录、对话历史等数据在服务重启后将被清空。
-            如需持久化，请在 Render 控制台「Disks」挂载磁盘到
-            <code>/opt/render/project/src/instance</code>，并设置
-            <code>DATABASE_URI=sqlite:///instance/lake_eval.db</code>。
-        </div>
-        """, unsafe_allow_html=True)
+        if is_mono:
+            # 单体模式（Streamlit Cloud 免费实例，前后端共用容器）
+            st.markdown("""
+            <div style="padding:0.75rem 1rem;background:#fff8e1;border:1px solid #f9d87a;
+                        border-radius:8px;margin-bottom:1.2rem;color:#8a5a00;font-size:0.85rem;">
+                <strong>⚠️ 当前为临时演示模式（单体部署）</strong><br>
+                当前运行在 Streamlit Cloud 免费实例，前后端共用一个容器，
+                使用<strong>内存数据库</strong>，注册用户、历史记录、对话历史等
+                在容器重启/休眠（约 7 天闲置）后将被清空。<br>
+                核心计算（TLI / BQI / 削减方案 / AI 助手 + 知识库）全部可用。
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            # 分离模式 + 内存 DB
+            st.markdown("""
+            <div style="padding:0.75rem 1rem;background:#fff8e1;border:1px solid #f9d87a;
+                        border-radius:8px;margin-bottom:1.2rem;color:#8a5a00;font-size:0.85rem;">
+                <strong>⚠️ 当前为临时演示模式（无持久化数据库）</strong><br>
+                注册用户、历史记录、对话历史等数据在服务重启后将被清空。
+            </div>
+            """, unsafe_allow_html=True)
 
     st.markdown("""
     <div style="display:flex;align-items:center;justify-content:space-between;

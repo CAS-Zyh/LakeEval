@@ -39,11 +39,22 @@ GUEST_TOKEN_EXPIRY_HOURS = int(os.getenv("GUEST_TOKEN_EXPIRY_HOURS", "2"))
 USER_DAILY_CHAT_LIMIT = int(os.getenv("USER_DAILY_CHAT_LIMIT", "10"))
 
 # --- 安全 ---
-# CORS 白名单（逗号分隔），公网部署时改为你的前端域名
+# CORS 白名单（逗号分隔）。公网部署时改为你的前端域名。
+# 默认包含：
+#   - 本地开发 (localhost / 127.0.0.1)
+#   - 单体部署子进程同源请求（Streamlit UI -> 本机 Flask）
+#   - Streamlit Cloud 所有免费域名 (*.streamlit.app)，便于直接使用
+_ST_DEFAULT_ORIGINS = [
+    f"http://localhost:{STREAMLIT_PORT}",
+    f"http://127.0.0.1:{STREAMLIT_PORT}",
+    "https://*.streamlit.app",
+    f"http://localhost:{FLASK_PORT}",
+    f"http://127.0.0.1:{FLASK_PORT}",
+]
 ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv(
         "ALLOWED_ORIGINS",
-        f"http://localhost:{STREAMLIT_PORT},http://127.0.0.1:{STREAMLIT_PORT}"
+        ",".join(_ST_DEFAULT_ORIGINS)
     ).split(",") if o.strip()
 ]
 # 全局 IP 速率限制（每分钟请求数）
