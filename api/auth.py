@@ -6,10 +6,21 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import JWT_SECRET, JWT_EXPIRY_HOURS, GUEST_TOKEN_EXPIRY_HOURS
-from .models import User
 
 
-def generate_token(user: User) -> str:
+def _get_user_model():
+    """延迟导入 User 模型，避免在 db.init_app 之前导入导致的 ImportError。
+
+    注意：api.auth.py 在被 api.__init__.py 导入时就会立刻执行顶层代码，
+    而 Flask-SQLAlchemy 要求 db.init_app(app) 之后才能 import models（否则
+    可能遇到 db 未绑定 / 引擎未创建等各种 import-time 错误）。
+    所以这里改成在真正需要 User 类（生成 token / 验证 current_user）时才懒加载。
+    """
+    from .models import User  # noqa: WPS433 — 故意延迟导入
+    return User
+
+
+def generate_token(user) -> str:
     payload = {
         "user_id": user.id,
         "username": user.username,
@@ -80,6 +91,7 @@ def get_current_user():
     if payload.get("role") == "guest":
         return GuestUser(payload.get("ip", "0.0.0.0"))
 
+    User = _get_user_model()
     user = User.query.get(payload.get("user_id"))
     if not user or not user.is_active:
         return None

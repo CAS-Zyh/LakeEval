@@ -40,8 +40,6 @@ def create_app():
     _cors_origins = _normalize_origins(ALLOWED_ORIGINS)
     CORS(app, origins=_cors_origins, supports_credentials=False, resources={r"/*": {"origins": _cors_origins}})
 
-    db.init_app(app)
-
     # --- IP 速率限制 ---
     _ip_hits = defaultdict(list)
 
@@ -78,6 +76,12 @@ def create_app():
                 "server_time": datetime.utcnow().isoformat() + "Z",
             },
         })
+
+    # 关键：db.init_app(app) 必须放在「任何可能间接 import models / auth 的代码」之前。
+    # api.auth 原先在顶层有 `from .models import User`，在 import-time 就会触发 SQLAlchemy。
+    # 虽然现在已经把它改成懒加载了，但这里继续显式保证 init_app → import routes 的顺序，
+    # 可以彻底避免 Streamlit Cloud 部署时 "ImportError ... from .models import User"。
+    db.init_app(app)
 
     from .routes.auth import auth_bp
     from .routes.tli import tli_bp
