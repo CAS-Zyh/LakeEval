@@ -92,12 +92,27 @@ def ensure_flask_running(force: bool = False) -> bool:
     返回值：
         True  = Flask 已经就绪（要么本来就有，要么刚刚拉起并通过 /api/status）
         False = 启动失败或超时，UI 应该显示「后端未连接」提示。
+
+    重要：本函数绝不能在 st.set_page_config() 之前调用！否则 Streamlit 会黑屏。
+    原因：Streamlit 要求第一条 st.* 命令必须是 st.set_page_config()。
+    本函数内部会阻塞最长 30s 等子进程，如果在 set_page_config 之前调用，
+    Streamlit 启动检测会判定为「脚本无响应」→ 页面黑屏。
+    现在已改为在 ui/app.py 的 set_page_config() 之后再调用本函数。
     """
     # 只有 ui/app.py 里调用一次：用模块级 flag 避免多页面重复启动
     import __main__ as _mod  # type: ignore[import-not-found]
 
     sys.path.insert(0, str(_PROJECT_ROOT))
     from config import FLASK_HOST, FLASK_PORT  # 延迟导入，避免循环
+
+    # 把 Streamlit Secrets 同步到 os.environ（在子进程启动前）。
+    # 必须在 st.set_page_config() 之后调用才安全，否则会黑屏。
+    # 这里直接调用，确保调用时机正确：app.py 已经先 set_page_config 再调本函数。
+    try:
+        from ui.api_client import _apply_streamlit_secrets_to_env
+        _apply_streamlit_secrets_to_env()
+    except Exception:  # noqa: BLE001
+        pass
 
     base = os.getenv("API_BASE_URL", "").strip()
     if base and not force:

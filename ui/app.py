@@ -7,18 +7,23 @@ from ui.theme import apply_theme
 from ui.auth import require_auth, current_user, logout_button, login_form
 from ui.api_client import api
 
-# ==== Streamlit Cloud 单体部署：启动时在容器内拉起 Flask 子进程 ====
-# 如果设置了 API_BASE_URL（分离部署），本步骤自动跳过；
-# 否则就在 127.0.0.1:5001 上起 Flask，前后端共用一个免费容器，0 成本无需 VISA。
-from ui.flask_bootstrap import ensure_flask_running  # noqa: E402
-
-_flask_ok = ensure_flask_running()
-
+# ⚠️ 重要：st.set_page_config 必须是「整个 Streamlit 脚本的第一条 st.* 调用」。
+# 之前版本把 ensure_flask_running() 放在 set_page_config 之前，
+# 它会阻塞最长 30s 等子进程，并且间接调用 st.secrets → Streamlit 启动卡死 → 黑屏。
+# 现在改为：先 set_page_config → 再 ensure_flask_running()。
 st.set_page_config(
     page_title="淮河流域中心生态室 - 湖库富营养化评价系统",
     page_icon="🌊",
     layout="wide",
 )
+
+# ==== Streamlit Cloud 单体部署：启动时在容器内拉起 Flask 子进程 ====
+# 如果设置了 API_BASE_URL（分离部署），本步骤自动跳过；
+# 否则就在 127.0.0.1:5001 上起 Flask，前后端共用一个免费容器，0 成本无需 VISA。
+# 放在 set_page_config 之后：既保证 Streamlit 不黑屏，也让 st.secrets 可用。
+from ui.flask_bootstrap import ensure_flask_running  # noqa: E402
+
+_flask_ok = ensure_flask_running()
 
 apply_theme()
 
