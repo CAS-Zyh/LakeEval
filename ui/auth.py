@@ -1,5 +1,20 @@
 import streamlit as st
 from .api_client import api
+from .flask_bootstrap import ensure_flask_running
+
+
+def _ensure_backend():
+    """确保 Flask 后端子进程已启动。
+
+    Flask 子进程原本只在首页 app.py 中拉起；但 Streamlit 多页应用中，
+    用户直接访问/刷新子页面（如 BQI、TLI）时 app.py 不会执行，导致后端
+    未启动、接口报「无法连接服务器」。所有页面都会调用 require_auth()，
+    因此在这里统一兜底启动（内部有端口检测，重复调用不会重复拉起）。
+    """
+    try:
+        ensure_flask_running()
+    except Exception:
+        pass
 
 
 def _ensure_guest_token():
@@ -60,6 +75,7 @@ def login_form():
 
 
 def require_auth():
+    _ensure_backend()
     _ensure_guest_token()
     return st.session_state.get("user")
 

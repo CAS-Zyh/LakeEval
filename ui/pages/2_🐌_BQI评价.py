@@ -22,7 +22,37 @@ user = require_auth()
 
 
 def _configure_matplotlib():
-    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun", "Arial Unicode MS", "sans-serif"]
+    # 显式注册系统中文字体文件，防止 matplotlib 字体缓存缺失/过期导致中文乱码
+    from matplotlib import font_manager
+
+    _family = "Microsoft YaHei"
+    if os.name == "nt":
+        for _fp in (
+            r"C:\Windows\Fonts\msyh.ttc",    # 微软雅黑
+            r"C:\Windows\Fonts\msyhbd.ttc",  # 微软雅黑粗体
+            r"C:\Windows\Fonts\simhei.ttf",  # 黑体
+            r"C:\Windows\Fonts\simsun.ttc",  # 宋体
+            r"C:\Windows\Fonts\simkai.ttf",  # 楷体
+            r"C:\Windows\Fonts\Deng.ttf",    # 等线
+        ):
+            if os.path.exists(_fp):
+                try:
+                    font_manager.fontManager.addfont(_fp)
+                except Exception:
+                    pass
+        # 从字体文件解析真实族名，作为首选，避免 sans-serif 列表回退歧义
+        _probe = r"C:\Windows\Fonts\msyh.ttc"
+        if os.path.exists(_probe):
+            try:
+                _family = font_manager.FontProperties(fname=_probe).get_name()
+            except Exception:
+                _family = "Microsoft YaHei"
+
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = [
+        _family, "Microsoft YaHei", "SimHei", "DengXian", "SimSun", "KaiTi",
+        "Noto Sans CJK SC", "WenQuanYi Micro Hei", "Arial Unicode MS", "sans-serif",
+    ]
     plt.rcParams["axes.unicode_minus"] = False
 
 
