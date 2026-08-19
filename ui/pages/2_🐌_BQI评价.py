@@ -3,8 +3,10 @@ import os
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PROJECT_ROOT)
-# 本地依赖目录（沙箱无法写入系统 site-packages 时，matplotlib 安装于此）
-sys.path.append(os.path.join(_PROJECT_ROOT, ".vendor"))
+# 本地依赖目录（仅 Windows 沙箱需要：无法写入系统 site-packages 时，matplotlib 等安装于此）
+# 云端为 Linux 环境，.vendor 内是 Windows 版二进制（.pyd），无法加载；改用 requirements.txt 安装
+if os.name == "nt":
+    sys.path.append(os.path.join(_PROJECT_ROOT, ".vendor"))
 
 import matplotlib.pyplot as plt
 import numpy as np

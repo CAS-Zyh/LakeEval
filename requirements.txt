@@ -18,6 +18,8 @@ python-dotenv>=1.0,<2              # .env 加载
 
 # --- 科学计算 ---
 numpy>=1.26,<2                     # TLI 计算 & TF-IDF 矩阵 & 绘图数组
+pandas>=2.0,<3                     # BQI 评价数据表处理（前端汇总表）
+matplotlib>=3.7,<4                 # BQI 评价图 A / 图 B 绘制（云端 Linux 环境安装）
 
 # --- 可视化 ---
 plotly>=5.18,<6                    # 雷达图 / 函数曲线 / 贡献条（Streamlit 原生支持）
