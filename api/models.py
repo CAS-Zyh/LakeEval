@@ -92,6 +92,36 @@ class ChatHistory(db.Model):
         }
 
 
+class StandardTolerance(db.Model):
+    """中国淡水大型底栖无脊椎动物耐污值表（印发版）。
+    来源：data/tolerance_seed.json（启动时若表为空自动导入）。
+    耐污值范围 0-10，值越高表示越耐污。
+    """
+    __tablename__ = "standard_tolerance"
+    __table_args__ = (
+        db.Index("idx_st_genus", "genus"),
+        db.Index("idx_st_family", "family"),
+    )
+    id = db.Column(db.Integer, primary_key=True)
+    phylum = db.Column(db.String(64), nullable=False)
+    class_name = db.Column(db.String(64), default="")
+    order_name = db.Column(db.String(64), default="")
+    family = db.Column(db.String(64), default="")
+    genus = db.Column(db.String(64), default="")
+    tolerance_value = db.Column(db.Float, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "phylum": self.phylum,
+            "class_name": self.class_name,
+            "order_name": self.order_name,
+            "family": self.family,
+            "genus": self.genus,
+            "tolerance_value": self.tolerance_value,
+        }
+
+
 class GuestUsage(db.Model):
     __tablename__ = "guest_usage"
     __table_args__ = (db.UniqueConstraint("ip_address", "usage_date"),)
@@ -105,4 +135,40 @@ class GuestUsage(db.Model):
             "ip_address": self.ip_address,
             "usage_date": self.usage_date.isoformat(),
             "chat_count": self.chat_count,
+        }
+
+
+class BenthicSpecies(db.Model):
+    """中国淡水大型底栖无脊椎动物耐污值表（试行）。
+    来源：data/benthic_tolerance.json（启动时若表为空自动导入）。
+    耐污值范围 0-10，值越高表示越耐污（清洁水→低值，污染水→高值）。
+    """
+    __tablename__ = "benthic_species"
+    id = db.Column(db.Integer, primary_key=True)
+    phylum_zh = db.Column(db.String(64), index=True)
+    phylum_en = db.Column(db.String(128))
+    class_zh = db.Column(db.String(64), index=True)
+    class_en = db.Column(db.String(128))
+    order_zh = db.Column(db.String(64))
+    order_en = db.Column(db.String(128))
+    family_zh = db.Column(db.String(64), index=True)
+    family_en = db.Column(db.String(128))
+    genus_zh = db.Column(db.String(64), index=True)
+    genus_en = db.Column(db.String(128), index=True)
+    tolerance_value = db.Column(db.Float, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "phylum_zh": self.phylum_zh,
+            "phylum_en": self.phylum_en,
+            "class_zh": self.class_zh,
+            "class_en": self.class_en,
+            "order_zh": self.order_zh,
+            "order_en": self.order_en,
+            "family_zh": self.family_zh,
+            "family_en": self.family_en,
+            "genus_zh": self.genus_zh,
+            "genus_en": self.genus_en,
+            "tolerance_value": self.tolerance_value,
         }

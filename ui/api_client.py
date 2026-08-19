@@ -84,6 +84,25 @@ class ApiClient:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def post_file(self, path, file_bytes, filename="upload.csv", mime="text/csv", extra_data=None):
+        """上传文件到后端（multipart/form-data）。不设置 Content-Type，
+        让 requests 自动处理 boundary。extra_data 为额外表单字段 dict。"""
+        try:
+            headers = {}
+            token = st.session_state.get("token")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            files = {"file": (filename, file_bytes, mime)}
+            data = extra_data or {}
+            resp = requests.post(
+                f"{_get_base_url()}{path}", files=files, data=data, headers=headers, timeout=60,
+            )
+            return resp.json()
+        except requests.exceptions.ConnectionError:
+            return {"success": False, "error": "无法连接服务器，请确认后端服务已启动"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def get(self, path, params=None):
         try:
             resp = requests.get(f"{_get_base_url()}{path}", params=params, headers=self._headers(), timeout=30)

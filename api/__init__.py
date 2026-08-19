@@ -109,6 +109,12 @@ def create_app():
             _init_default_admin()
         except Exception as e:
             app.logger.warning(f"[DB] 默认管理员初始化跳过（{type(e).__name__}: {str(e)[:120]}）")
+        try:
+            from modules.db_manager import seed_from_json
+            from config import get_project_root
+            seed_from_json(get_project_root())
+        except Exception as e:
+            app.logger.warning(f"[DB] 底栖耐污值字典自动导入跳过（{type(e).__name__}: {str(e)[:120]}）")
 
     return app
 
