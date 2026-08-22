@@ -231,124 +231,170 @@ uploaded_file = st.file_uploader("上传数据文件", type=["csv", "xlsx"], key
 if uploaded_file is not None:
     file_bytes = uploaded_file.getvalue()
     filename = uploaded_file.name
-    is_excel = filename.lower().endswith(".xlsx") or filename.lower().endswith(".xls")
-    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if is_excel else "text/csv"
+    file_key = f"{filename}:{len(file_bytes)}:{season}"
 
-    with st.spinner(f"正在解析并计算 BQI（{season}）..."):
-        result_batch = api.post_file(
-            "/bqi/batch_calculate",
-            file_bytes,
-            filename=filename,
-            mime=mime,
-            extra_data={"season": season},
+    # 仅在文件或季节变化时重新上传计算；否则沿用 session_state 中的修正后结果，避免 rerun 覆盖用户手动耐污值
+    if st.session_state.get("bqi_file_key") != file_key:
+        is_excel = filename.lower().endswith(".xlsx") or filename.lower().endswith(".xls")
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if is_excel else "text/csv"
+
+        with st.spinner(f"正在解析并计算 BQI（{season}）..."):
+            result_batch = api.post_file(
+                "/bqi/batch_calculate",
+                file_bytes,
+                filename=filename,
+                mime=mime,
+                extra_data={"season": season},
+            )
+
+        if not result_batch.get("success"):
+            error_box(f"上传失败：{result_batch.get('error', '未知错误')}")
+        else:
+            st.session_state.bqi_file_key = file_key
+            st.session_state.bqi_current = result_batch["data"]
+
+    data = st.session_state.get("bqi_current")
+    if not data:
+        st.stop()
+
+    samples = data["samples"]
+    summary = data["summary"]
+    unknown = data.get("unknown_species", [])
+
+    # 总览卡片（断面数目 / 平均 BQI·平均 BI / 最优·最差站点）
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        metric_card("断面数目", str(summary["count"]), "已解析样本", color="#1d4ed8")
+    with col_b:
+        metric_card(
+            "平均 BQI / 平均 BI",
+            f"{summary['avg_bqi']:.2f}<span style='font-size:1rem;color:#6b7280;'> / BI {summary['avg_bi']:.2f}</span>",
+            "全样本均值（越高越好）",
+            color="#6366f1",
+        )
+    with col_c:
+        metric_card(
+            "最优 / 最差站点",
+            f"{summary['best_site']} · {summary['worst_site']}",
+            f"BQI {summary['max_bqi']:.2f} / {summary['min_bqi']:.2f}",
+            color="#8b5cf6",
         )
 
-    if not result_batch.get("success"):
-        error_box(f"上传失败：{result_batch.get('error', '未知错误')}")
-    else:
-        data = result_batch["data"]
-        samples = data["samples"]
-        summary = data["summary"]
-        unknown = data.get("unknown_species", [])
+    # ── 各点位 BQI 及分项得分（图 A + 图 B） ──
+    section_title(f"各点位 BQI 及分项得分 — {data.get('season_label', season)}")
+    summary_df = pd.DataFrame([{
+        "样点": s["site_name"],
+        "物种数 (S_obs)": s["species_count"],
+        "BI 监测值": s["bi"],
+        "BI 得分值": s["bi_score"],
+        "物种数得分值": s["s_score"],
+        "BQI 得分 (100分制)": s["bqi"],
+        "底栖动物状况等级": s["grade_name"],
+    } for s in samples])
+    render_bqi_score_chart(summary_df)
+    render_bqi_stacked_chart(summary_df)
 
-        st.session_state.last_bqi_batch = data
+    # ── 完整评估结果表（颜色高亮） ──
+    section_title("底栖动物状况评估结果")
+    grade_colors = {s["grade_name"]: s["grade_color"] for s in samples}
 
-        # 总览卡片（断面数目 / 平均 BQI·平均 BI / 最优·最差站点）
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            metric_card("断面数目", str(summary["count"]), "已解析样本", color="#1d4ed8")
-        with col_b:
-            metric_card(
-                "平均 BQI / 平均 BI",
-                f"{summary['avg_bqi']:.2f}<span style='font-size:1rem;color:#6b7280;'> / BI {summary['avg_bi']:.2f}</span>",
-                "全样本均值（越高越好）",
-                color="#6366f1",
-            )
-        with col_c:
-            metric_card(
-                "最优 / 最差站点",
-                f"{summary['best_site']} · {summary['worst_site']}",
-                f"BQI {summary['max_bqi']:.2f} / {summary['min_bqi']:.2f}",
-                color="#8b5cf6",
-            )
+    def _style_grade(row):
+        color = grade_colors.get(row["底栖动物状况等级"], "#ffffff")
+        return [
+            f"background-color: {color}40; font-weight: 600" if col == "底栖动物状况等级" else ""
+            for col in row.index
+        ]
 
-        # ── 各点位 BQI 及分项得分（图 A + 图 B） ──
-        section_title(f"各点位 BQI 及分项得分 — {data.get('season_label', season)}")
-        summary_df = pd.DataFrame([{
-            "样点": s["site_name"],
-            "物种数 (S_obs)": s["species_count"],
-            "BI 监测值": s["bi"],
-            "BI 得分值": s["bi_score"],
-            "物种数得分值": s["s_score"],
-            "BQI 得分 (100分制)": s["bqi"],
-            "底栖动物状况等级": s["grade_name"],
-        } for s in samples])
-        render_bqi_score_chart(summary_df)
-        render_bqi_stacked_chart(summary_df)
+    st.dataframe(
+        summary_df.style.apply(_style_grade, axis=1),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-        # ── 完整评估结果表（颜色高亮） ──
-        section_title("底栖动物状况评估结果")
-        grade_colors = {s["grade_name"]: s["grade_color"] for s in samples}
+    # ── 物种匹配明细表（含匹配方式，耐污值可编辑） ──
+    section_title("物种耐污值修正")
+    st.caption("下表按「鉴定单元」去重展示自动匹配结果，可直接修改「耐污值」列后点击下方按钮重新计算并重绘图表。")
 
-        def _style_grade(row):
-            color = grade_colors.get(row["底栖动物状况等级"], "#ffffff")
-            return [
-                f"background-color: {color}40; font-weight: 600" if col == "底栖动物状况等级" else ""
-                for col in row.index
-            ]
+    species_tv = {}
+    for s in samples:
+        for d in s.get("matched_details", []):
+            name = d.get("name", "")
+            if name and name not in species_tv:
+                species_tv[name] = {
+                    "tolerance_value": float(d.get("tolerance_value", 5.0)),
+                    "match_method": d.get("match_method", d.get("match_level", "")),
+                }
 
-        st.dataframe(
-            summary_df.style.apply(_style_grade, axis=1),
+    edit_df = pd.DataFrame([
+        {
+            "鉴定单元": name,
+            "耐污值": info["tolerance_value"],
+            "匹配方式": info["match_method"],
+        }
+        for name, info in species_tv.items()
+    ])
+
+    if not edit_df.empty:
+        edited_df = st.data_editor(
+            edit_df,
             use_container_width=True,
             hide_index=True,
+            num_rows="fixed",
+            disabled=["鉴定单元", "匹配方式"],
+            column_config={
+                "耐污值": st.column_config.NumberColumn(
+                    "耐污值", min_value=0.0, max_value=10.0, step=0.1,
+                ),
+            },
+            key="bqi_tolerance_editor",
         )
 
-        # ── 物种匹配明细表（含匹配方式） ──
-        detail_rows = []
-        for s in samples:
-            for d in s.get("matched_details", []):
-                detail_rows.append({
-                    "样点": s["site_name"],
-                    "鉴定单元": d.get("name", ""),
-                    "数量": d.get("count", ""),
-                    "耐污值": d.get("tolerance_value", ""),
-                    "匹配方式": d.get("match_method", d.get("match_level", "")),
-                })
-        if detail_rows:
-            with st.expander("🔬 物种匹配明细（含匹配方式）", expanded=False):
-                st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+        if st.button("重新计算并重绘图表", type="primary", use_container_width=True):
+            overrides = {}
+            for _, row in edited_df.iterrows():
+                name = str(row["鉴定单元"]).strip()
+                try:
+                    new_tv = float(row["耐污值"])
+                except (TypeError, ValueError):
+                    new_tv = float(species_tv.get(name, {}).get("tolerance_value", 5.0))
+                orig_tv = float(species_tv.get(name, {}).get("tolerance_value", 5.0))
+                if abs(new_tv - orig_tv) > 1e-9:
+                    overrides[name] = new_tv
 
-        # ── 未匹配物种编辑区 ──
-        if unknown:
-            st.divider()
-            section_title("未匹配物种编辑区")
-            warning_box(
-                f"⚠️ 检测到 {len(unknown)} 个物种未在国标数据库中匹配到耐污值（已按默认 Si=5.0 计算）。"
-                f"您可以在下方手动指定耐污值后重新计算。"
-            )
-            with st.form("bqi_edit_tolerance"):
-                edit_values = {}
-                cols = st.columns(min(3, len(unknown)))
-                for i, sp in enumerate(unknown):
-                    with cols[i % 3]:
-                        edit_values[sp] = st.number_input(
-                            f"{sp}",
-                            min_value=0.0, max_value=10.0, value=5.0, step=0.1,
-                            key=f"bqi_edit_{sp}",
-                        )
-                if st.form_submit_button("应用自定义耐污值并重新计算", type="primary", use_container_width=True):
-                    # 重新上传并传入自定义耐污值
-                    st.info("自定义耐污值功能将在后续版本中通过 API 参数传递，当前版本请先调整 CSV 中的物种名使其匹配数据库。")
+            if not overrides:
+                info_box("未检测到耐污值修改，结果保持不变。")
+            else:
+                samples_payload = [
+                    {"site_name": s["site_name"], "species_counts": s.get("species_counts", {})}
+                    for s in samples
+                ]
+                with st.spinner("正在重新计算..."):
+                    recalc = api.post(
+                        "/bqi/recalculate",
+                        {"season": season, "samples": samples_payload, "overrides": overrides},
+                    )
+                if not recalc.get("success"):
+                    error_box(f"重新计算失败：{recalc.get('error', '未知错误')}")
+                else:
+                    st.session_state.bqi_current = recalc["data"]
                     st.rerun()
 
-        if st.button("发送批量结果到 AI 助手"):
-            st.session_state.ai_context = {
-                "batch_bqi_summary": summary,
-                "samples_count": len(samples),
-                "worst_site": summary["worst_site"],
-                "best_site": summary["best_site"],
-            }
-            success_box("已附加批量 BQI 摘要到 AI 助手")
+    # ── 未匹配物种提示 ──
+    if unknown:
+        st.divider()
+        warning_box(
+            f"⚠️ 检测到 {len(unknown)} 个物种未在国标数据库中匹配到耐污值（默认 Si=5.0）。"
+            f"可在上方「物种耐污值修正」表中修改其耐污值后重新计算。"
+        )
+
+    if st.button("发送批量结果到 AI 助手"):
+        st.session_state.ai_context = {
+            "batch_bqi_summary": summary,
+            "samples_count": len(samples),
+            "worst_site": summary["worst_site"],
+            "best_site": summary["best_site"],
+        }
+        success_box("已附加批量 BQI 摘要到 AI 助手")
 
 
 # ============================================================

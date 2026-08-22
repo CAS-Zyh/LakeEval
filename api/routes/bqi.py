@@ -6,6 +6,7 @@
 import io
 import csv
 import json
+from typing import Dict
 from flask import Blueprint, request, jsonify
 from sqlalchemy import or_
 from ..auth import require_auth
@@ -217,6 +218,77 @@ def batch_calculate():
             "season": season,
             "season_label": result.get("season_label", ""),
             "scale": "0-100",
+        },
+    })
+
+
+@bqi_bp.route("/recalculate", methods=["POST"])
+@require_auth
+def recalculate():
+    """基于前端已解析的样本与用户手动指定的耐污值，重新计算 BQI。
+
+    POST JSON：
+    {
+        "season": "spring",
+        "samples": [{"site_name": "湖心_01", "species_counts": {"杆丝蚓属": 12, ...}}, ...],
+        "overrides": {"细蟌科": 7.76, ...}
+    }
+    """
+    data = request.json or {}
+    season = (data.get("season") or "spring").lower()
+    samples = data.get("samples") or []
+    overrides_raw = data.get("overrides") or {}
+
+    # 解析 overrides：仅保留合法数值（0-10）
+    overrides: Dict[str, float] = {}
+    for name, val in overrides_raw.items():
+        try:
+            tv = float(val)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= tv <= 10.0:
+            overrides[str(name).strip()] = tv
+
+    if not samples:
+        return jsonify({"success": False, "error": "缺少样本数据"}), 400
+
+    # 将 samples 还原为宽格式 DataFrame
+    import pandas as pd
+    rows = []
+    for s in samples:
+        site = str(s.get("site_name", "")).strip()
+        if not site:
+            continue
+        row = {"site_name": site}
+        counts = s.get("species_counts") or {}
+        for sp, cnt in counts.items():
+            try:
+                row[str(sp)] = int(float(cnt))
+            except (TypeError, ValueError):
+                row[str(sp)] = 0
+        rows.append(row)
+
+    if not rows:
+        return jsonify({"success": False, "error": "样本数据无效"}), 400
+
+    df = pd.DataFrame(rows).fillna(0)
+    calc = _get_calculator()
+    result = calc.batch_calculate(df, site_col="site_name", season=season, overrides=overrides)
+
+    if "error" in result:
+        return jsonify({"success": False, "error": result["error"]}), 400
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "samples": result["samples"],
+            "chart_data": result["chart_data"],
+            "summary": result["summary"],
+            "unknown_species": result["unknown_species"],
+            "season": season,
+            "season_label": result.get("season_label", ""),
+            "scale": "0-100",
+            "overrides": overrides,
         },
     })
 

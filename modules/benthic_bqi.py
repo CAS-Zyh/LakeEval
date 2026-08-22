@@ -168,7 +168,7 @@ class BenthicBQICalculator:
     def align_species(self, species_names: List[str]) -> Dict[str, dict]:
         """批量对齐物种名到耐污值。
 
-        匹配顺序：属 → 科 → 目 → 纲 → 门，逐级向上；再模糊、兜底、默认。
+        匹配顺序：同义词 → 精确全匹配（属→科→目→纲→门）→ 层级向上回溯 → 子串降级 → 兜底 → 默认。
         返回 {原始名: {tolerance_value, matched_name, match_level}}
         match_level: genus|family|order|class|phylum|fuzzy|fallback|unmatched
         """
@@ -202,7 +202,7 @@ class BenthicBQICalculator:
         return None
 
     def _substring_lookup(self, name: str) -> Optional[Tuple[float, str, str]]:
-        """第 3 级：双向子串与后缀剥离匹配。
+        """第 4 级：双向子串与后缀剥离匹配（无后缀输入的兜底）。
 
         将数据库名称去掉"属/科/目/纲/门"等后缀得到核心串，再判断核心串与输入名
         是否互相包含。例如输入"霍甫水丝蚓"命中"水丝蚓属"、输入"纹沼螺"命中"沼螺属"。
@@ -222,14 +222,77 @@ class BenthicBQICalculator:
                     return float(tv), level, key
         return None
 
+    def _hierarchical_lookup(self, name: str) -> Optional[Tuple[float, str, str]]:
+        """第 3 级：层级感知向上回溯匹配。
+
+        当输入名带分类后缀（如"细蟌科"）且同级精确匹配未命中时：
+        1. 在同级做模糊匹配（找包含核心词的条目，如"蟌科"）
+        2. 逐级向上取父分类单元的耐污值（如 order="蜻蜓目"）
+
+        例如"细蟌科" → family 同级模糊匹配命中"蟌科" → 取其 order="蜻蜓目" → tv=7.76。
+        返回 (tolerance_value, match_level, matched_name) 或 None。
+        """
+        # 后缀识别（亚科要在科之前匹配，避免被"科"截断）
+        suffixes = [("亚科", "family"), ("属", "genus"), ("科", "family"),
+                    ("目", "order_name"), ("纲", "class_name"), ("门", "phylum")]
+        input_field = None
+        for suffix, field in suffixes:
+            if name.endswith(suffix):
+                input_field = field
+                break
+        if not input_field:
+            return None
+
+        # 层级顺序（从细到粗），用于向上回溯
+        levels = ["genus", "family", "order_name", "class_name", "phylum"]
+        input_level_idx = levels.index(input_field)
+        parent_levels = levels[input_level_idx + 1:]
+
+        # 在 input_field 同级做模糊匹配：val 与 name 互相包含
+        df = self.tolerance_df
+        candidates = []
+        for _, row in df.iterrows():
+            val = str(row.get(input_field, "") or "").strip()
+            if not val:
+                continue
+            if val in name or name in val:
+                candidates.append(row)
+        if not candidates:
+            return None
+
+        # 最长 val 优先（更具体的匹配）
+        candidates.sort(key=lambda r: len(str(r.get(input_field, "")).strip()), reverse=True)
+
+        # 逐级向上取父分类单元的耐污值
+        index_map = {
+            "family": self._family_index,
+            "order_name": self._order_index,
+            "class_name": self._class_index,
+            "phylum": self._phylum_index,
+        }
+        level_label_map = {"family": "family", "order_name": "order",
+                           "class_name": "class", "phylum": "phylum"}
+
+        for best_row in candidates:
+            for parent_level in parent_levels:
+                parent_name = str(best_row.get(parent_level, "") or "").strip()
+                if not parent_name:
+                    continue
+                parent_index = index_map[parent_level]
+                if parent_name in parent_index:
+                    return float(parent_index[parent_name]), level_label_map[parent_level], parent_name
+        return None
+
     # ── BI 生物指数 ─────────────────────────────────────────
 
-    def calculate_bi(self, species_counts: Dict[str, int]) -> float:
+    def calculate_bi(self, species_counts: Dict[str, int], overrides: Optional[Dict[str, float]] = None) -> float:
         """BI = Σ(Si × ni) / N
 
         Si：物种耐污值（0-10，值越高越耐污）
         ni：物种个体数
         N：总个体数
+
+        overrides：用户手动指定的耐污值 {物种名: 耐污值}，优先级最高。
         """
         total_individuals = sum(species_counts.values())
         if total_individuals == 0:
@@ -237,16 +300,16 @@ class BenthicBQICalculator:
 
         weighted_sum = 0.0
         for name, count in species_counts.items():
-            si = self._resolve_tolerance(name)
+            si = self._resolve_tolerance(name, overrides=overrides)
             weighted_sum += si * count
 
         return weighted_sum / total_individuals
 
-    def _resolve_full(self, name: str) -> Dict[str, object]:
-        """多级匹配流水线：同义词映射 → 精确全匹配 → 双向子串降级 → 兜底/未匹配。
+    def _resolve_full(self, name: str, overrides: Optional[Dict[str, float]] = None) -> Dict[str, object]:
+        """多级匹配流水线：同义词映射 → 精确全匹配 → 层级向上回溯 → 双向子串降级 → 兜底/未匹配。
 
         返回 {tolerance_value, match_level, matched_name, match_method}。
-        match_method: 精确匹配 / 同义词映射 (原始名 -> 标准名) / 子串降级匹配 (原始名 -> 命中名) / 兜底降级 / 未匹配
+        match_method: 精确匹配 / 同义词映射 (原始名 -> 标准名) / 层级向上回溯 (原始名 -> 命中名) / 子串降级匹配 (原始名 -> 命中名) / 兜底降级 / 未匹配
         """
         n = (name or "").strip()
         if not n:
@@ -255,6 +318,15 @@ class BenthicBQICalculator:
                 "match_level": "unmatched",
                 "matched_name": None,
                 "match_method": "未匹配",
+            }
+
+        # 第 0 级：用户手动指定耐污值（优先级最高）
+        if overrides and n in overrides:
+            return {
+                "tolerance_value": float(overrides[n]),
+                "match_level": "manual",
+                "matched_name": n,
+                "match_method": "手动指定",
             }
 
         # 第 1 级：同义词/常见种名映射表
@@ -279,7 +351,17 @@ class BenthicBQICalculator:
                 "match_method": "精确匹配",
             }
 
-        # 第 3 级：双向子串与后缀剥离匹配
+        # 第 3 级：层级感知向上回溯（带分类后缀的输入：同级模糊匹配后向上取父级耐污值）
+        hierarchical = self._hierarchical_lookup(n)
+        if hierarchical:
+            return {
+                "tolerance_value": hierarchical[0],
+                "match_level": hierarchical[1],
+                "matched_name": hierarchical[2],
+                "match_method": f"层级向上回溯 ({n} -> {hierarchical[2]})",
+            }
+
+        # 第 4 级：双向子串与后缀剥离匹配
         sub = self._substring_lookup(n)
         if sub:
             return {
@@ -289,7 +371,7 @@ class BenthicBQICalculator:
                 "match_method": f"子串降级匹配 ({n} -> {sub[2]})",
             }
 
-        # 第 4 级：兜底降级
+        # 第 5 级：兜底降级
         if n in FALLBACK_TOLERANCE:
             return {
                 "tolerance_value": FALLBACK_TOLERANCE[n],
@@ -305,9 +387,9 @@ class BenthicBQICalculator:
             "match_method": "未匹配",
         }
 
-    def _resolve_tolerance(self, name: str) -> float:
+    def _resolve_tolerance(self, name: str, overrides: Optional[Dict[str, float]] = None) -> float:
         """解析单个物种名的耐污值（多级匹配流水线）。"""
-        return float(self._resolve_full(name)["tolerance_value"])
+        return float(self._resolve_full(name, overrides=overrides)["tolerance_value"])
 
     # ── 种类数得分 ──────────────────────────────────────────
 
@@ -330,6 +412,7 @@ class BenthicBQICalculator:
         self,
         species_counts: Dict[str, int],
         season: str = "spring",
+        overrides: Optional[Dict[str, float]] = None,
     ) -> dict:
         """综合 BQI = 50 × (10-BI)/(10-BI_ref) + 50 × S/S_ref。
 
@@ -351,7 +434,7 @@ class BenthicBQICalculator:
         bi_ref = params["bi_ref"]
         s_ref = params["s_ref"]
 
-        bi = self.calculate_bi(species_counts)
+        bi = self.calculate_bi(species_counts, overrides=overrides)
         total_count = sum(species_counts.values())
         species_count = len(species_counts)
 
@@ -411,6 +494,7 @@ class BenthicBQICalculator:
         df: pd.DataFrame,
         site_col: str = "site_name",
         season: str = "spring",
+        overrides: Optional[Dict[str, float]] = None,
     ) -> dict:
         """多点位批量计算 BQI。
 
@@ -418,6 +502,7 @@ class BenthicBQICalculator:
             df: 宽格式 DataFrame，行为站点，列为物种名（第一列 site_col）
             site_col: 站点列名
             season: "spring" | "autumn"
+            overrides: 用户手动指定的耐污值 {物种名: 耐污值}，优先级最高
 
         返回：
             {
@@ -452,7 +537,7 @@ class BenthicBQICalculator:
                 if n <= 0:
                     continue
 
-                resolved = self._resolve_full(col)
+                resolved = self._resolve_full(col, overrides=overrides)
                 tv = resolved["tolerance_value"]
                 match_level = resolved["match_level"]
                 match_method = resolved.get("match_method", match_level)
@@ -474,7 +559,7 @@ class BenthicBQICalculator:
             if not counts:
                 continue
 
-            result = self.calculate_bqi(counts, season)
+            result = self.calculate_bqi(counts, season, overrides=overrides)
             samples.append({
                 "site_name": site,
                 "bqi": result["bqi"],
